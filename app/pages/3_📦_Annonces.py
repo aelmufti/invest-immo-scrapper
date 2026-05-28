@@ -105,7 +105,7 @@ with session_scope() as s:
             "source": b.source,
             "score": last.score if last else None,
             "cashflow_mensuel": last.cashflow_mensuel if last else None,
-            "rdt_brut": last.rendement_brut if last else None,
+            "rdt_brut": (last.rendement_brut * 100) if (last and last.rendement_brut is not None) else None,
             "regime": last.regime_optimal if last else None,
             "vu_le": b.vu_le,
         })
@@ -148,7 +148,78 @@ edited = st.data_editor(
     disabled=[c for c in df_edit.columns if c != "supprimer"],
     column_config={
         "supprimer": st.column_config.CheckboxColumn(
-            "🗑️", help="Cocher pour sélectionner les biens à supprimer", default=False
+            "🗑️ Suppr.",
+            help="Cocher pour sélectionner les biens à supprimer",
+            default=False,
+        ),
+        "id": st.column_config.NumberColumn(
+            "ID", help="Identifiant interne du bien", format="%d"
+        ),
+        "ville": st.column_config.TextColumn(
+            "Ville", help="Commune où se trouve le bien"
+        ),
+        "cp": st.column_config.TextColumn(
+            "Code postal", help="Code postal de la commune"
+        ),
+        "type": st.column_config.TextColumn(
+            "Type", help="Type de bien (appartement, maison…)"
+        ),
+        "prix": st.column_config.NumberColumn(
+            "Prix (€)",
+            help="Prix de vente affiché dans l'annonce",
+            format="%.0f €",
+        ),
+        "surface": st.column_config.NumberColumn(
+            "Surface (m²)",
+            help="Surface habitable en m²",
+            format="%.0f m²",
+        ),
+        "pieces": st.column_config.NumberColumn(
+            "Pièces", help="Nombre total de pièces (T1, T2, T3…)", format="%d"
+        ),
+        "dpe": st.column_config.TextColumn(
+            "DPE",
+            help="Classe énergétique (A = excellent, G = passoire thermique)",
+        ),
+        "source": st.column_config.TextColumn(
+            "Source",
+            help="Origine de l'annonce (manuel, csv, bookmarklet : domaine du site…)",
+        ),
+        "score": st.column_config.ProgressColumn(
+            "Score /100",
+            help=(
+                "Note globale pondérée (cash-flow, rendement, décote DVF, DPE, "
+                "tension locative, distance Paris, travaux). Configurable dans "
+                "la page ⚙️ Paramètres."
+            ),
+            min_value=0,
+            max_value=100,
+            format="%.0f",
+        ),
+        "cashflow_mensuel": st.column_config.NumberColumn(
+            "Cash-flow / mois (€)",
+            help=(
+                "Trésorerie nette mensuelle après loyer perçu, mensualité du "
+                "crédit, charges, taxe foncière, vacance locative, impôt et "
+                "prélèvements sociaux — pour le régime fiscal optimal."
+            ),
+            format="%+.0f €",
+        ),
+        "rdt_brut": st.column_config.NumberColumn(
+            "Rdt brut (%)",
+            help="Rendement brut = loyer annuel × 12 / prix d'achat (hors frais ni charges).",
+            format="%.1f %%",
+        ),
+        "regime": st.column_config.TextColumn(
+            "Régime fiscal",
+            help=(
+                "Régime fiscal le plus avantageux entre : "
+                "nu (location nue), micro_bic (meublé micro-BIC, 50% d'abattement), "
+                "lmnp_reel (meublé au réel avec amortissements)."
+            ),
+        ),
+        "vu_le": st.column_config.DatetimeColumn(
+            "Vu le", help="Date de première détection du bien", format="DD/MM/YYYY HH:mm"
         ),
     },
     key="biens_editor",

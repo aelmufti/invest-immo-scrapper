@@ -74,9 +74,16 @@ def extraire_prix(text: str) -> Optional[float]:
 
 
 def extraire_surface(text: str) -> Optional[float]:
-    s = _first(r"([0-9]+(?:[.,][0-9]+)?)\s*m(?:²|2)\b", text)
-    if not s:
-        s = _first(r"surface(?:\s+habitable)?\s*[:\-]?\s*([0-9]+(?:[.,][0-9]+)?)", text)
+    # Priorité au décimal (plus précis, ex: "19.39 m²" plutôt que "19 m²" du titre)
+    s = _first(r"([0-9]+[.,][0-9]+)\s*m(?:²|2)\b", text)
+    v = _to_float(s) if s else None
+    if v and 5 <= v <= 1000:
+        return v
+    s = _first(r"([0-9]+)\s*m(?:²|2)\b", text)
+    v = _to_float(s) if s else None
+    if v and 5 <= v <= 1000:
+        return v
+    s = _first(r"surface(?:\s+habitable)?\s*[:\-]?\s*([0-9]+(?:[.,][0-9]+)?)", text)
     v = _to_float(s) if s else None
     if v and 5 <= v <= 1000:
         return v
@@ -117,6 +124,12 @@ def extraire_annee(text: str) -> Optional[int]:
     s = _first(r"construit(?:\s+en)?\s*[:\-]?\s*(1[89][0-9]{2}|20[0-2][0-9])", text)
     if not s:
         s = _first(r"ann[ée]e\s+(?:de\s+)?construction\s*[:\-]?\s*(1[89][0-9]{2}|20[0-2][0-9])", text)
+    if not s:
+        # "Dans une résidence de 2017", "immeuble de 1985"
+        s = _first(
+            r"(?:r[ée]sidence|immeuble|b[âa]ti(?:ment)?)\s+(?:de\s+|construite?\s+en\s+)?(1[89][0-9]{2}|20[0-2][0-9])",
+            text,
+        )
     try:
         return int(s) if s else None
     except ValueError:
@@ -129,12 +142,44 @@ _DPE_RE = re.compile(
 )
 
 
+def _classe_dpe_depuis_conso(conso_kwh: float) -> str:
+    """Classe DPE 2021 (méthode lettre énergétique) depuis la conso en kWh/m².an.
+
+    Le DPE réel utilise le max(énergie, émissions CO2). On approche par
+    l'énergie seule, suffisant dans la grande majorité des cas.
+    Seuils officiels (arrêté du 31 mars 2021) :
+    """
+    if conso_kwh <= 70: return "A"
+    if conso_kwh <= 110: return "B"
+    if conso_kwh <= 180: return "C"
+    if conso_kwh <= 250: return "D"
+    if conso_kwh <= 330: return "E"
+    if conso_kwh <= 420: return "F"
+    return "G"
+
+
 def extraire_dpe(text: str) -> Optional[str]:
+    # 1) Pattern explicite "DPE: X" / "classe énergétique: X"
     m = _DPE_RE.search(text)
-    if not m:
-        return None
-    val = m.group(1) or m.group(2)
-    return val.upper() if val else None
+    if m:
+        val = m.group(1) or m.group(2)
+        if val:
+            return val.upper()
+    # 2) Déduction depuis la consommation en kWh/m².an (rendue visuellement
+    #    sur Bien'ici, SeLoger, etc. — la lettre n'est pas toujours dans le texte).
+    m = re.search(
+        r"([0-9]{2,4})\s*kWh\s*[/.]?\s*m[²2]\s*\.?\s*an",
+        text,
+        re.IGNORECASE,
+    )
+    if m:
+        try:
+            conso = int(m.group(1))
+            if 10 <= conso <= 2000:  # garde-fou
+                return _classe_dpe_depuis_conso(conso)
+        except ValueError:
+            pass
+    return None
 
 
 def extraire_ges(text: str) -> Optional[str]:
@@ -151,15 +196,23 @@ def extraire_taxe_fonciere(text: str) -> Optional[float]:
 
 
 def extraire_charges_copro(text: str) -> Optional[float]:
-    # "charges 1200 €/an" ou "150 €/mois de charges"
+    # "Charges annuelles : 1800 euros" / "charges annuelles 1200 €"
     s = _first(
-        r"charges?\s*(?:de\s*copropri[ée]t[ée])?\s*[:\-]?\s*([0-9][0-9 \u202f\xa0]{1,6})\s*€\s*/?\s*an",
+        r"charges?\s*(?:de\s*copropri[ée]t[ée])?\s*annuelles?\s*[:\-]?\s*([0-9][0-9 \u202f\xa0]{1,6})\s*(?:€|euros?)",
         text,
     )
     if s:
         return _to_float(s)
+    # "charges 1200 €/an"
     s = _first(
-        r"charges?\s*(?:mensuelles?)?\s*[:\-]?\s*([0-9][0-9 \u202f\xa0]{1,6})\s*€\s*/?\s*mois",
+        r"charges?\s*(?:de\s*copropri[ée]t[ée])?\s*[:\-]?\s*([0-9][0-9 \u202f\xa0]{1,6})\s*(?:€|euros?)\s*/?\s*an",
+        text,
+    )
+    if s:
+        return _to_float(s)
+    # "150 €/mois de charges"
+    s = _first(
+        r"charges?\s*(?:mensuelles?)?\s*[:\-]?\s*([0-9][0-9 \u202f\xa0]{1,6})\s*(?:€|euros?)\s*/?\s*mois",
         text,
     )
     v = _to_float(s) if s else None
@@ -167,13 +220,26 @@ def extraire_charges_copro(text: str) -> Optional[float]:
 
 
 def extraire_loyer(text: str) -> Optional[float]:
+    # 1) Loyer mensuel explicite
     s = _first(
-        r"loyer\s*(?:mensuel|estim[ée])?\s*[:\-]?\s*([0-9][0-9 \u202f\xa0]{1,6})\s*€\s*/?\s*mois",
+        r"loyer\s*(?:mensuel|estim[ée])?\s*[:\-]?\s*([0-9][0-9 \u202f\xa0]{1,6})\s*(?:€|euros?)\s*/?\s*mois",
         text,
     )
-    if not s:
-        s = _first(r"lou[ée]\s*([0-9][0-9 \u202f\xa0]{1,6})\s*€\s*/?\s*mois", text)
-    return _to_float(s) if s else None
+    if s:
+        return _to_float(s)
+    s = _first(r"lou[ée]\s*([0-9][0-9 \u202f\xa0]{1,6})\s*(?:€|euros?)\s*/?\s*mois", text)
+    if s:
+        return _to_float(s)
+    # 2) Loyer annuel (HT ou TTC) → /12
+    #    Ex: "Loyer annuel HT : 3 500 euros", "loyer annuel 8400 €"
+    s = _first(
+        r"loyer\s*annuel(?:\s*(?:HT|TTC|charges\s+comprises))?\s*[:\-]?\s*([0-9][0-9 \u202f\xa0]{2,6})\s*(?:€|euros?)",
+        text,
+    )
+    if s:
+        v = _to_float(s)
+        return v / 12.0 if v else None
+    return None
 
 
 _CP_VILLE_RE = re.compile(

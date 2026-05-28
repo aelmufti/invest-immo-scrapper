@@ -26,6 +26,8 @@ from typing import Any
 
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import HTMLResponse
+from urllib.parse import quote as _urlquote
 from pydantic import BaseModel
 from sqlalchemy import desc, select
 
@@ -93,6 +95,221 @@ app.add_middleware(
 @app.get("/health")
 def health() -> dict:
     return {"status": "ok"}
+
+
+# ---------------------------------------------------------------------------
+# Bookmarklet — page HTML autonome (hors iframe Streamlit) pour permettre
+# le drag du favori vers la barre du navigateur.
+# ---------------------------------------------------------------------------
+
+_BOOKMARKLET_JS = """
+(function () {
+  var API = "__API__";
+  try {
+    var lds = [];
+    document.querySelectorAll('script[type="application/ld+json"]').forEach(function(s){
+      try { lds.push(JSON.parse(s.textContent)); } catch(e) {}
+    });
+    var og = {};
+    document.querySelectorAll('meta[property], meta[name]').forEach(function(m){
+      var k = m.getAttribute('property') || m.getAttribute('name');
+      var v = m.getAttribute('content');
+      if (k && v) og[k] = v;
+    });
+    var text = (document.body.innerText || "").slice(0, 100000);
+    var payload = { url: location.href, title: document.title, text: text, json_ld: lds, og: og };
+    fetch(API, { method: "POST", headers: {"Content-Type":"application/json"}, body: JSON.stringify(payload) })
+      .then(function(r){ return r.json(); })
+      .then(function(j){ alert("\\u2705 Bien #" + j.bien_id + " " + (j.nouveau ? "nouveau" : "mis a jour") + " (source: " + j.source + ")"); })
+      .catch(function(e){ alert("\\u274C Echec import : " + e); });
+  } catch (e) {
+    alert("\\u274C Erreur bookmarklet : " + e);
+  }
+})();
+""".strip()
+
+
+_BOOKMARKLET_LIST_JS = """
+(function () {
+  var API = "__API__";
+  var IMMO = ["Product","Offer","RealEstateListing","Apartment","House","Residence","SingleFamilyResidence","Accommodation"];
+  try {
+    // 1) Collecte tous les blocs JSON-LD
+    var lds = [];
+    document.querySelectorAll('script[type="application/ld+json"]').forEach(function(s){
+      try { lds.push(JSON.parse(s.textContent)); } catch(e) {}
+    });
+
+    // 2) Walk recursif pour trouver tous les noeuds immo avec contenu utile
+    var items = [];
+    function walk(o) {
+      if (Array.isArray(o)) o.forEach(walk);
+      else if (o && typeof o === 'object') {
+        var t = o['@type'];
+        if (typeof t === 'string') t = [t];
+        if (Array.isArray(t) && t.some(function(x){ return IMMO.indexOf(x) >= 0; })) {
+          if (o.price || o.offers || o.floorSize || o.numberOfRooms) items.push(o);
+        }
+        Object.keys(o).forEach(function(k){ walk(o[k]); });
+      }
+    }
+    lds.forEach(walk);
+
+    // 3) Dedupe sur url|name|hash
+    var seen = {};
+    items = items.filter(function(it){
+      var k = (it.url || it.name || JSON.stringify(it).slice(0, 80));
+      if (seen[k]) return false; seen[k] = 1; return true;
+    });
+
+    // 4) Fallback DOM si rien trouve : detecte les cards repetitives
+    //    avec un lien interne et un prix visible.
+    if (items.length < 2) {
+      var cards = [];
+      var hostname = location.hostname.replace(/^www\\./,'');
+      document.querySelectorAll('a[href]').forEach(function(a){
+        var href = a.href;
+        if (!href || !href.indexOf) return;
+        // garde les liens internes ressemblant a une fiche detail
+        if (href.indexOf(hostname) < 0 && href.indexOf('://') >= 0) return;
+        if (!/annonce|bien|detail|listing|/.test(href)) {/*pass*/}
+        var card = a.closest('article, li, div, section');
+        if (!card) return;
+        var txt = (card.innerText || '').slice(0, 2000);
+        var mPrix = txt.match(/(\\d[\\d\\s.]{2,8})\\s*\\u20AC/);
+        if (!mPrix) return;
+        if (cards.length && cards[cards.length-1].href === href) return;
+        cards.push({ href: href, text: txt });
+      });
+      // dedupe par href
+      var seenH = {};
+      cards = cards.filter(function(c){ if(seenH[c.href]) return false; seenH[c.href]=1; return true; });
+      if (cards.length >= 2) {
+        items = cards.map(function(c){
+          return { '@type':'RealEstateListing', url: c.href, name: c.text.split('\\n')[0].slice(0,120), description: c.text };
+        });
+      }
+    }
+
+    if (items.length === 0) {
+      alert("\\u26A0\\uFE0F Aucune annonce detectee sur cette page.\\nUtilisez plutot le bookmarklet 'Importer cette annonce' sur une fiche detail.");
+      return;
+    }
+
+    if (!confirm("Importer " + items.length + " annonce(s) detectee(s) sur cette page ?")) return;
+
+    var ok = 0, ko = 0, done = 0;
+    function finish() {
+      done++;
+      if (done === items.length) {
+        alert("\\u2705 Import liste : " + ok + " OK, " + ko + " echec(s) sur " + items.length + ".");
+      }
+    }
+
+    items.forEach(function(it){
+      var hasText = !!(it.description && it.description.length > 80);
+      var payload = {
+        url: it.url || location.href,
+        title: it.name || document.title,
+        text: hasText ? it.description : null,
+        json_ld: [it],
+        og: {}
+      };
+      fetch(API, { method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify(payload) })
+        .then(function(r){ return r.json(); })
+        .then(function(j){ if (j && j.bien_id) ok++; else ko++; finish(); })
+        .catch(function(){ ko++; finish(); });
+    });
+  } catch (e) {
+    alert("\\u274C Erreur bookmarklet liste : " + e);
+  }
+})();
+""".strip()
+
+
+def _make_bookmarklet_href(js_src: str, api_url: str) -> str:
+    js_compact = " ".join(line.strip() for line in js_src.splitlines() if line.strip())
+    js_compact = js_compact.replace("__API__", api_url)
+    return "javascript:" + _urlquote(js_compact, safe="")
+
+
+@app.get("/bookmarklet", response_class=HTMLResponse)
+def bookmarklet_page() -> str:
+    """Page HTML autonome avec les favoris draggables.
+
+    Servie hors iframe Streamlit pour que le drag-and-drop fonctionne.
+    """
+    settings = get_settings()
+    api_url = f"http://{settings.api_host}:{settings.api_port}/biens/import/page"
+    href_one = _make_bookmarklet_href(_BOOKMARKLET_JS, api_url)
+    href_list = _make_bookmarklet_href(_BOOKMARKLET_LIST_JS, api_url)
+    return f"""<!doctype html>
+<html lang="fr"><head><meta charset="utf-8">
+<title>Bookmarklets — Invest-Immo</title>
+<style>
+  body {{ font-family: system-ui, -apple-system, sans-serif; max-width: 760px; margin: 2em auto; padding: 0 1em; color: #222; }}
+  a.btn {{ display:inline-block; padding:0.8em 1.4em; color:white;
+          border-radius:6px; text-decoration:none; font-weight:600; font-size:1.05em; margin-right: 0.6em; }}
+  a.btn1 {{ background:#1f77b4; }}
+  a.btn2 {{ background:#ff7f0e; }}
+  code {{ background:#f4f4f4; padding:0.1em 0.4em; border-radius:3px; }}
+  .url-box {{ background:#f9f9f9; border:1px solid #ddd; padding:1em; border-radius:6px;
+             word-break:break-all; font-family: monospace; font-size:0.75em; max-height: 8em; overflow: auto; }}
+  .ok {{ color:#1a7f37; }} .warn {{ color:#9a6700; }}
+  h2 {{ margin-top: 2em; border-top: 1px solid #eee; padding-top: 1em; }}
+  details {{ margin: 1em 0; }}
+</style></head>
+<body>
+<h1>🔖 Bookmarklets — Invest-Immo</h1>
+
+<p><strong>Glissez ces boutons dans votre barre de favoris</strong> (⌘+Maj+B pour l'afficher) :</p>
+
+<p>
+  <a class="btn btn1" href="{href_one}">📥 Importer cette annonce</a>
+  <a class="btn btn2" href="{href_list}">📋 Importer toute la liste</a>
+</p>
+
+<p class="warn">⚠️ Si le drag ne marche pas, voir « Installation manuelle » en bas.</p>
+
+<h2>📥 « Importer cette annonce »</h2>
+<p>À utiliser sur une <strong>fiche détail</strong> d'annonce (Bien'ici, SeLoger, Leboncoin, Castorus…).
+Capture JSON-LD + OpenGraph + texte de la page, importe <strong>un</strong> bien.</p>
+<ol>
+  <li>Ouvrez une fiche détail dans ce navigateur.</li>
+  <li>Cliquez le favori.</li>
+  <li>Alerte « ✅ Bien #N créé » → visible dans <em>📦 Annonces</em>.</li>
+</ol>
+
+<h2>📋 « Importer toute la liste »</h2>
+<p>À utiliser sur une <strong>page de résultats</strong> (recherche Castorus, liste Bien'ici, etc.).
+Détecte automatiquement toutes les annonces visibles (via JSON-LD multi-items ou fallback DOM heuristique),
+demande confirmation (« Importer N annonces ? »), puis envoie un POST par bien.</p>
+<ol>
+  <li>Faites une recherche filtrée sur le site (ex: Castorus 72000, prix max 110k, DPE A-D).</li>
+  <li>Cliquez le favori.</li>
+  <li>Confirmez le nombre détecté.</li>
+  <li>Alerte finale : « ✅ Import liste : N OK, M échec(s) ».</li>
+</ol>
+<p class="warn">⚠️ Limitations connues : les pages liste contiennent souvent moins de champs par carte
+(pas toujours de DPE, charges, taxe foncière). Pour enrichir un bien, retournez sur sa fiche détail
+et utilisez « 📥 Importer cette annonce » — il fera un <em>upsert</em> sur la même URL.</p>
+
+<h2>Installation manuelle</h2>
+<p>Si le drag-and-drop ne marche pas dans votre navigateur :</p>
+<ol>
+  <li>Clic droit sur la barre de favoris → <em>Ajouter une page…</em></li>
+  <li>Nom : <code>📥 Importer cette annonce</code> (ou <code>📋 Importer la liste</code>)</li>
+  <li>URL : coller la chaîne <code>javascript:…</code> correspondante ci-dessous.</li>
+</ol>
+<details><summary>URL « 📥 Importer cette annonce »</summary>
+<div class="url-box">{href_one}</div></details>
+<details><summary>URL « 📋 Importer toute la liste »</summary>
+<div class="url-box">{href_list}</div></details>
+
+<h2 class="ok">Tout reste local</h2>
+<p>L'API ({api_url}) écoute sur <code>127.0.0.1</code>. Aucune donnée ne sort de votre machine.</p>
+
+</body></html>"""
 
 
 # ---------------------------------------------------------------------------

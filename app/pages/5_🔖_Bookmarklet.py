@@ -115,35 +115,26 @@ bookmarklet_href = _to_bookmarklet(bookmarklet_js_lisible)
 
 st.subheader("1. Installer le favori")
 
+standalone_url = f"http://{settings.api_host}:{settings.api_port}/bookmarklet"
+
+st.warning(
+    "⚠️ Streamlit affiche cette page dans un **iframe sandboxé** qui empêche "
+    "le drag-and-drop des favoris (rien ne se passe quand on glisse). "
+    "Utilisez la page HTML autonome ci-dessous."
+)
+
 st.markdown(
-    """
-**Sur ordinateur (Chrome, Firefox, Safari, Edge) :**
-1. Affichez la barre des favoris (Ctrl/⌘ + Maj + B).
-2. **Glissez-déposez le lien ci-dessous** dans votre barre de favoris.
-3. Renommez-le si vous voulez (ex: « 📥 Importer cette annonce »).
+    f"""
+### 👉 [Ouvrir la page d'installation du favori]({standalone_url})
+
+Cliquez le lien ci-dessus, puis sur la page qui s'ouvre :
+1. Affichez votre barre de favoris (⌘+Maj+B sur Mac, Ctrl+Maj+B sur Windows/Linux).
+2. **Glissez** le bouton bleu « 📥 Importer cette annonce » dans la barre.
+3. C'est installé.
+
+Si le drag ne marche pas non plus là-bas, la même page donne l'URL brute à
+coller manuellement dans un nouveau favori (clic droit sur la barre → *Ajouter une page*).
 """
-)
-
-# Streamlit ne laisse pas insérer de `javascript:` href dans un st.link_button.
-# On utilise un st.markdown avec unsafe_allow_html pour l'ancre draggable.
-st.markdown(
-    f'''
-<a href="{bookmarklet_href}"
-   style="display:inline-block;padding:0.6em 1.1em;background:#1f77b4;
-          color:white;border-radius:6px;text-decoration:none;font-weight:600;
-          font-family:system-ui,sans-serif;">
-   📥 Importer cette annonce
-</a>
-<p style="color:#888;font-size:0.85em;margin-top:0.5em;">
-   ↑ glissez ce bouton dans votre barre de favoris.
-</p>
-''',
-    unsafe_allow_html=True,
-)
-
-st.info(
-    "Si votre navigateur refuse le drag (rare), copiez le code ci-dessous "
-    "et créez un favori manuellement avec ce contenu comme URL."
 )
 
 with st.expander("Code à copier-coller (URL du favori)"):
